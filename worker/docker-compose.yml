@@ -1,0 +1,12 @@
+services:
+  relay-worker:
+    build: .
+    container_name: wetrakr-relay-worker
+    restart: unless-stopped
+    environment:
+      SUPABASE_URL: "${SUPABASE_URL}"
+      SUPABASE_SERVICE_KEY: "${SUPABASE_SERVICE_KEY}"
+      TRAKT_CLIENT_ID: "${TRAKT_CLIENT_ID}"
+      HISTORY_INTERVAL: "300"
+      WATCH_INTERVAL: "60"
+      LOG_LEVEL: "INFO"

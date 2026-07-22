@@ -1,0 +1,83 @@
+name: wetrakr-relay
+
+# Self-contained stack — no external accounts needed.
+#   db        Postgres (runs schema.sql + roles on first boot)
+#   postgrest PostgREST — the same REST API surface the app expects from Supabase
+#   gateway   nginx — maps /rest/v1/* onto PostgREST (mimics Supabase's gateway)
+#   web       Next.js front end + pairing wizard + manage page
+#   worker    Python sync engine (Trakt -> WeTrakr), runs 24/7
+#
+# Quick start:
+#   cp .env.example .env   # then set TRAKT_CLIENT_ID
+#   docker compose up -d --build
+#   open http://<server-ip>:3000
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: postgres
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./supabase/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./deploy/db/02-roles.sql:/docker-entrypoint-initdb.d/02-roles.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  postgrest:
+    image: postgrest/postgrest:v12.2.3
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PGRST_DB_URI: postgres://authenticator:authpw@db:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: ${PGRST_JWT_SECRET}
+
+  gateway:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    depends_on:
+      - postgrest
+    volumes:
+      - ./deploy/gateway/nginx.conf:/etc/nginx/nginx.conf:ro
+
+  web:
+    build: ./web
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    environment:
+      SUPABASE_URL: http://gateway
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID}
+      WETRAKR_API_URL: ${WETRAKR_API_URL:-https://api.wetrakr.com}
+      APP_URL: ${APP_URL:-}
+    ports:
+      - "${WEB_PORT:-8088}:3000"
+
+  worker:
+    build: ./worker
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      gateway:
+        condition: service_started
+    environment:
+      SUPABASE_URL: http://gateway
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID}
+      HISTORY_INTERVAL: "300"
+      WATCH_INTERVAL: "60"
+      LOG_LEVEL: "INFO"
+
+volumes:
+  db_data:
