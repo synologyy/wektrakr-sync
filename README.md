@@ -1,21 +1,31 @@
 # WeTrakr Relay
 
-Mirror your **Trakt** watch history (and an optional live *now playing* status)
-into **WeTrakr** — for every player, even the ones that can't talk to WeTrakr
-directly.
+Mirror your watch history (and, for Trakt, an optional live *now playing*
+status) into **WeTrakr** — from **Trakt** or **Nuvio**, for every player, even
+the ones that can't talk to WeTrakr directly.
 
 ## Why this exists
 
 Trakt allows only a single connected community app on free accounts, and some
-players (e.g. **Nuvio**, **Fusion**) can scrobble to Trakt but have **no WeTrakr
-integration** at all. Relay reads your **public Trakt profile** — no matter which
-player produced the history — and forwards new movies/episodes to your WeTrakr
-account. Nothing gets installed on the player, and it doesn't consume your one
-Trakt connection slot.
+players (e.g. **Nuvio**, **Fusion**) can't connect to WeTrakr at all. Relay
+reads your history from a source you already use and forwards new
+movies/episodes to your WeTrakr account. Nothing gets installed on the player.
 
 ```
-Players (Plex / Nuvio / Fusion / …) ──> Trakt (public profile) ──> Relay worker ──> WeTrakr
+Fusion ─▶ Trakt (public profile) ─┐
+                                  ├─▶ Relay worker ─▶ WeTrakr
+Nuvio  ─▶ Nuvio Sync (your login) ┘
 ```
+
+## Sources
+
+| Source    | How it reads                                   | Auth stored              | Live now-playing |
+|-----------|------------------------------------------------|--------------------------|------------------|
+| **Trakt** | your **public** Trakt profile (no OAuth slot)  | just the username        | ✅ optional      |
+| **Nuvio** | Nuvio Sync API (`sync_pull_watched_items`)     | a Nuvio **refresh token**| — (history only) |
+
+The user picks the source in the wizard. For Nuvio they sign in (email +
+password); the password is used only to obtain a token and is never stored.
 
 ## Architecture
 
@@ -25,11 +35,11 @@ Fully self-contained — `docker compose up` needs no external accounts:
 |----------|----------------------------------------------------------------|
 | `db`     | Postgres — schema created on first boot from `db/init.sql`      |
 | `web`    | Next.js — landing page, pairing wizard, manage page            |
-| `worker` | Python — syncs Trakt → WeTrakr every 5 min (live: every 1 min) |
+| `worker` | Python — syncs each connection to WeTrakr every 5 min          |
 
-`web` and `worker` talk to Postgres directly (no ORM, no external API layer).
-Only two things are stored per user: the (public) Trakt username and the WeTrakr
-scrobble token. No login, no password — each connection gets a random manage link.
+`web` and `worker` talk to Postgres directly. Per connection we store the
+source, the WeTrakr scrobble token, and (for Nuvio) a refresh token. No login,
+no passwords — each connection gets a random manage link.
 
 ## Quick start
 
@@ -40,8 +50,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Then open `http://<server-ip>:8088` and run the wizard:
-Trakt username → confirm the WeTrakr code → done.
+Then open `http://<server-ip>:8088` and run the wizard.
 
 ### Deploy on a Hetzner Cloud server
 
@@ -65,12 +74,13 @@ Point your reverse proxy (Pangolin/newt, nginx, Caddy) at port `8088`.
 | `WEB_PORT`          |          | Host port for the UI (default `8088`)                            |
 | `WETRAKR_API_URL`   |          | WeTrakr API base (unofficial, default `https://api.wetrakr.com`) |
 
+Nuvio uses the public Nuvio API (`https://api.nuvio.tv`) with the documented
+publishable key; override via `NUVIO_PUBLISHABLE_KEY` if needed.
+
 ## Notes
 
 - **Unofficial WeTrakr endpoints.** Relay speaks the same device-pairing and
   webhook endpoints as the open-source WeTrakr Kodi add-on. They may change.
-- **Public Trakt profile required.** Relay uses only Trakt's documented public
-  API (no OAuth), so the profile must be public.
+- **Public Trakt profile required** for the Trakt source (no OAuth).
 - **Timestamps.** The scrobble endpoint doesn't accept `watched_at`, so Relay
-  only forwards new activity (from connection time). Use WeTrakr's own Trakt
-  import for your back catalog.
+  only forwards new activity. Use WeTrakr's own import for your back catalog.

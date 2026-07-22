@@ -4,21 +4,19 @@ WeTrakr Relay — sync worker
 ===========================
 
 Runs continuously (Docker). Reads all connections from Postgres and, per
-connection, syncs:
+connection, mirrors watch history to WeTrakr.
 
-  - Watch history (public Trakt profile -> WeTrakr scrobble), every
-    HISTORY_INTERVAL seconds
-  - Now playing (public /watching endpoint -> WeTrakr playing), every
-    WATCH_INTERVAL seconds, only for connections with live_enabled
+Sources:
+  - trakt: public Trakt profile (history + optional live now-playing)
+  - nuvio: Nuvio Sync API (watch history only), authenticated per user
 
-No Trakt OAuth: only public profiles are read, via the Client ID. The
-WeTrakr part uses the unofficial Kodi webhook (see
-github.com/wetrakr/wetrakr-kodi) — it can change at any time.
+No Trakt OAuth is used. The WeTrakr part uses the unofficial Kodi webhook
+(see github.com/wetrakr/wetrakr-kodi) — it can change at any time.
 """
 
-import json
 import logging
 import os
+import re
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -29,6 +27,12 @@ import requests
 TRAKT_BASE = "https://api.trakt.tv"
 WETRAKR_BASE = os.environ.get("WETRAKR_API_URL", "https://api.wetrakr.com")
 TRAKT_CLIENT_ID = os.environ["TRAKT_CLIENT_ID"]
+
+NUVIO_BASE = os.environ.get("NUVIO_API_URL", "https://api.nuvio.tv")
+NUVIO_KEY = os.environ.get(
+    "NUVIO_PUBLISHABLE_KEY",
+    "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN",
+)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 
@@ -44,6 +48,16 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger("relay")
+
+
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def conn_label(conn):
+    if conn.get("source") == "nuvio":
+        return f"nuvio#{conn.get('nuvio_profile_id') or 1}"
+    return conn.get("trakt_username") or str(conn.get("id"))
 
 
 # ─── Postgres ─────────────────────────────────────────────────────
@@ -157,6 +171,96 @@ def fetch_watching(username):
     return r.json()
 
 
+# ─── Nuvio Sync (per-user auth, history only) ─────────────────────
+
+def nuvio_headers(access_token=None):
+    h = {"apikey": NUVIO_KEY, "Content-Type": "application/json",
+         "User-Agent": USER_AGENT}
+    if access_token:
+        h["Authorization"] = f"Bearer {access_token}"
+    return h
+
+
+def nuvio_refresh(refresh_token):
+    r = requests.post(
+        f"{NUVIO_BASE}/auth/v1/token?grant_type=refresh_token",
+        headers=nuvio_headers(),
+        json={"refresh_token": refresh_token},
+        timeout=20,
+    )
+    if r.status_code in (400, 401, 403):
+        raise PermissionError("nuvio_auth")
+    r.raise_for_status()
+    d = r.json()
+    return d["access_token"], d.get("refresh_token") or refresh_token
+
+
+def nuvio_watched(access_token, profile_id, page_size=200):
+    r = requests.post(
+        f"{NUVIO_BASE}/rest/v1/rpc/sync_pull_watched_items",
+        headers=nuvio_headers(access_token),
+        json={"p_profile_id": profile_id, "p_page": 1, "p_page_size": page_size},
+        timeout=30,
+    )
+    if r.status_code in (401, 403):
+        raise PermissionError("nuvio_auth")
+    r.raise_for_status()
+    return r.json()
+
+
+_SE_RE = re.compile(r"\s+s\d+\s*e\d+\s*$", re.IGNORECASE)
+
+
+def strip_se(title):
+    return _SE_RE.sub("", title or "").strip()
+
+
+def nuvio_ids(content_id):
+    ids = {"tmdb": None, "imdb": None, "tvdb": None}
+    if not content_id or ":" not in content_id:
+        return ids
+    prefix, _, val = content_id.partition(":")
+    prefix = prefix.lower()
+    if prefix == "tmdb":
+        try:
+            ids["tmdb"] = int(val)
+        except ValueError:
+            pass
+    elif prefix == "imdb":
+        ids["imdb"] = val or None
+    elif prefix == "tvdb":
+        try:
+            ids["tvdb"] = int(val)
+        except ValueError:
+            pass
+    return ids
+
+
+def build_payload_nuvio(item, event="scrobble", progress=100.0):
+    ids = nuvio_ids(item.get("content_id"))
+    if not any(ids.values()):
+        return None
+    ctype = item.get("content_type")
+    if ctype == "movie":
+        return {
+            "event": event, "media_type": "movie",
+            "title": item.get("title", ""), "year": 0,
+            "ids": ids, "progress": round(progress, 1),
+        }
+    if ctype == "series":
+        return {
+            "event": event, "media_type": "episode",
+            "title": "",
+            "show_title": strip_se(item.get("title", "")),
+            "show_ids": ids,
+            "season": int(item.get("season") or 0),
+            "episode": int(item.get("episode") or 0),
+            "ids": {"tmdb": None, "imdb": None, "tvdb": None},
+            "progress": round(progress, 1),
+        }
+    return None
+
+
 # ─── Mapping & WeTrakr ────────────────────────────────────────────
 
 def map_ids(trakt_ids):
@@ -244,7 +348,7 @@ def sync_history(conn):
     except PermissionError as e:
         update_connection(conn["id"], {
             "last_error": str(e),
-            "last_synced_at": datetime.now(timezone.utc).isoformat(),
+            "last_synced_at": now_iso(),
         })
         log.warning("[%s] history not readable: %s", username, e)
         return
@@ -252,10 +356,7 @@ def sync_history(conn):
     seen = set(conn.get("seen_ids") or [])
     new_items = [i for i in items if i["id"] not in seen]
 
-    patch = {
-        "last_synced_at": datetime.now(timezone.utc).isoformat(),
-        "last_error": None,
-    }
+    patch = {"last_synced_at": now_iso(), "last_error": None}
 
     for item in new_items:
         payload = build_payload(item)
@@ -272,6 +373,51 @@ def sync_history(conn):
             seen.add(item["id"])
             patch["last_watched_at"] = item["watched_at"]
             log.info("[%s] → %s", username, describe(payload))
+        time.sleep(SEND_DELAY)
+
+    patch["seen_ids"] = list(seen)[-SEEN_CAP:]
+    update_connection(conn["id"], patch)
+
+
+def sync_history_nuvio(conn):
+    label = conn_label(conn)
+    profile_id = conn.get("nuvio_profile_id") or 1
+
+    try:
+        access, new_refresh = nuvio_refresh(conn["nuvio_refresh_token"])
+        items = nuvio_watched(access, profile_id)
+    except PermissionError:
+        update_connection(conn["id"], {
+            "last_error": "nuvio_auth", "last_synced_at": now_iso()})
+        log.warning("[%s] Nuvio auth failed", label)
+        return
+    except requests.RequestException:
+        return
+
+    patch = {"last_synced_at": now_iso(), "last_error": None}
+    if new_refresh != conn["nuvio_refresh_token"]:
+        patch["nuvio_refresh_token"] = new_refresh
+
+    seen = set(conn.get("seen_ids") or [])
+    for item in reversed(items):  # oldest first
+        key = "n|%s|%s|%s|%s" % (
+            item.get("content_id"), item.get("season"),
+            item.get("episode"), item.get("watched_at"))
+        if key in seen:
+            continue
+        payload = build_payload_nuvio(item)
+        if not payload:
+            seen.add(key)
+            continue
+        try:
+            ok = send_to_wetrakr(conn["wetrakr_token"], payload)
+        except PermissionError:
+            patch["last_error"] = "wetrakr_auth"
+            log.warning("[%s] WeTrakr token rejected", label)
+            break
+        if ok:
+            seen.add(key)
+            log.info("[%s] → %s", label, describe(payload))
         time.sleep(SEND_DELAY)
 
     patch["seen_ids"] = list(seen)[-SEEN_CAP:]
@@ -324,19 +470,20 @@ def run():
             log.info("history run: %d connections", len(conns))
             for c in conns:
                 try:
-                    sync_history(c)
+                    if c.get("source") == "nuvio":
+                        sync_history_nuvio(c)
+                    else:
+                        sync_history(c)
                 except Exception:
-                    log.exception("[%s] history sync failed",
-                                  c["trakt_username"])
+                    log.exception("[%s] history sync failed", conn_label(c))
             last_history = now
 
         for c in conns:
-            if c.get("live_enabled"):
+            if c.get("live_enabled") and c.get("source") != "nuvio":
                 try:
                     sync_watching(c)
                 except Exception:
-                    log.exception("[%s] watching poll failed",
-                                  c["trakt_username"])
+                    log.exception("[%s] watching poll failed", conn_label(c))
 
         time.sleep(WATCH_INTERVAL)
 

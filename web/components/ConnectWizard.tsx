@@ -2,7 +2,13 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type Phase = "input" | "pairing" | "done";
+type Phase = "input" | "nuvio_profiles" | "pairing" | "done";
+type Source = "trakt" | "nuvio";
+type NuvioProfile = {
+  profile_index: number;
+  name: string;
+  avatar_color_hex: string | null;
+};
 
 const ERRORS: Record<string, string> = {
   invalid_username:
@@ -11,6 +17,9 @@ const ERRORS: Record<string, string> = {
     "Trakt doesn't know that username. Check the slug in your profile URL — it can differ from your display name.",
   private:
     "That profile is private, so Relay can't read its history. Set it to public in Trakt → Settings → Privacy, then try again.",
+  invalid_login: "Enter your Nuvio email and password.",
+  nuvio_login:
+    "Nuvio didn't accept those credentials. Check your email and password and try again.",
   expired:
     "The pairing code expired before it was entered. Start over to get a fresh one.",
   network: "Couldn't reach the server. Check your connection and try again.",
@@ -18,8 +27,18 @@ const ERRORS: Record<string, string> = {
 
 export default function ConnectWizard() {
   const [phase, setPhase] = useState<Phase>("input");
+  const [source, setSource] = useState<Source>("trakt");
+
+  // Trakt
   const [username, setUsername] = useState("");
   const [live, setLive] = useState(false);
+
+  // Nuvio
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [profiles, setProfiles] = useState<NuvioProfile[]>([]);
+  const [profileIndex, setProfileIndex] = useState<number | null>(null);
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -29,25 +48,65 @@ export default function ConnectWizard() {
   const [wetrakrUser, setWetrakrUser] = useState<string | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
   useEffect(() => {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, []);
 
+  function fail(code: string) {
+    setError(ERRORS[code] ?? "Something went wrong. Try again.");
+  }
+
+  function pickSource(s: Source) {
+    setSource(s);
+    setPhase("input");
+    setError(null);
+  }
+
+  // Nuvio: sign in and load profiles
+  async function loadProfiles() {
+    setError(null);
+    setBusy(true);
+    try {
+      const r = await fetch("/api/nuvio/profiles", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await r.json();
+      if (!r.ok) {
+        fail(data.error);
+        return;
+      }
+      const list: NuvioProfile[] = data.profiles ?? [];
+      setProfiles(list);
+      setProfileIndex(list[0]?.profile_index ?? 1);
+      setPhase("nuvio_profiles");
+    } catch {
+      fail("network");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // Both sources: start the WeTrakr pairing
   async function start() {
     setError(null);
     setBusy(true);
     try {
+      const body =
+        source === "trakt"
+          ? { source, trakt_username: username, live }
+          : { source, email, password, profile_index: profileIndex };
       const r = await fetch("/api/pair", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ trakt_username: username, live }),
+        body: JSON.stringify(body),
       });
       const data = await r.json();
       if (!r.ok) {
-        setError(ERRORS[data.error] ?? "Something went wrong. Try again.");
+        fail(data.error);
         return;
       }
       setUserCode(data.user_code);
@@ -70,14 +129,14 @@ export default function ConnectWizard() {
           } else if (pd.status === "expired") {
             if (pollRef.current) clearInterval(pollRef.current);
             setPhase("input");
-            setError(ERRORS.expired);
+            fail("expired");
           }
         } catch {
-          /* nächster Tick versucht es erneut */
+          /* next tick retries */
         }
       }, every);
     } catch {
-      setError(ERRORS.network);
+      fail("network");
     } finally {
       setBusy(false);
     }
@@ -85,28 +144,54 @@ export default function ConnectWizard() {
 
   const stepClass = (step: Phase) => {
     const order: Phase[] = ["input", "pairing", "done"];
-    const current = order.indexOf(phase);
+    const norm = phase === "nuvio_profiles" ? "input" : phase;
+    const current = order.indexOf(norm);
     const mine = order.indexOf(step);
     if (mine < current) return "step-label done";
     if (mine === current) return "step-label active";
     return "step-label";
   };
 
+  const canContinue =
+    source === "trakt" ? !!username.trim() : !!email.trim() && !!password;
+
   return (
     <div className="wizard">
       <h2>Connect in under a minute</h2>
       <p className="sub">
-        One field, one code, done. Everything you watch from now on follows
-        you to WeTrakr.
+        Pick your source, confirm one code, done. Everything you watch from now
+        on follows you to WeTrakr.
       </p>
 
       <div className="steps" aria-hidden="true">
-        <span className={stepClass("input")}>1 · Trakt profile</span>
+        <span className={stepClass("input")}>1 · Source</span>
         <span className={stepClass("pairing")}>2 · Approve on WeTrakr</span>
         <span className={stepClass("done")}>3 · Relaying</span>
       </div>
 
-      {phase === "input" && (
+      {(phase === "input" || phase === "nuvio_profiles") && (
+        <div
+          className="source-tabs"
+          style={{ display: "flex", gap: 8, marginBottom: 16 }}
+        >
+          <button
+            className={`btn ${source === "trakt" ? "primary" : ""}`}
+            onClick={() => pickSource("trakt")}
+            disabled={busy}
+          >
+            Trakt
+          </button>
+          <button
+            className={`btn ${source === "nuvio" ? "primary" : ""}`}
+            onClick={() => pickSource("nuvio")}
+            disabled={busy}
+          >
+            Nuvio
+          </button>
+        </div>
+      )}
+
+      {phase === "input" && source === "trakt" && (
         <div>
           <div className="field-row">
             <input
@@ -129,7 +214,6 @@ export default function ConnectWizard() {
               {busy ? "Checking…" : "Start pairing"}
             </button>
           </div>
-
           <label className="check">
             <input
               type="checkbox"
@@ -137,16 +221,92 @@ export default function ConnectWizard() {
               onChange={(e) => setLive(e.target.checked)}
             />
             <span>
-              Also mirror my live &ldquo;now playing&rdquo; status (polls
-              Trakt once a minute while you watch)
+              Also mirror my live &ldquo;now playing&rdquo; status (polls Trakt
+              once a minute while you watch)
             </span>
           </label>
-
           <p className="hint">
             Your profile needs to be public, and the username is the slug from
             your profile URL — trakt.tv/users/<b>this-part</b>.
           </p>
+          {error && <div className="error">{error}</div>}
+        </div>
+      )}
 
+      {phase === "input" && source === "nuvio" && (
+        <div>
+          <div
+            className="field-row"
+            style={{ flexDirection: "column", gap: 8, alignItems: "stretch" }}
+          >
+            <input
+              type="email"
+              placeholder="Nuvio email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              aria-label="Nuvio email"
+              autoComplete="email"
+              spellCheck={false}
+            />
+            <input
+              type="password"
+              placeholder="Nuvio password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && canContinue && !busy) loadProfiles();
+              }}
+              aria-label="Nuvio password"
+              autoComplete="current-password"
+            />
+            <button
+              className="btn primary"
+              onClick={loadProfiles}
+              disabled={!canContinue || busy}
+            >
+              {busy ? "Signing in…" : "Continue"}
+            </button>
+          </div>
+          <p className="hint">
+            Relay signs in to read your Nuvio watch history. Your password is
+            used only to sign in and is never stored — only a refresh token is
+            kept.
+          </p>
+          {error && <div className="error">{error}</div>}
+        </div>
+      )}
+
+      {phase === "nuvio_profiles" && (
+        <div>
+          <p className="sub">Which Nuvio profile should Relay mirror?</p>
+          <div
+            style={{
+              display: "flex",
+              flexWrap: "wrap",
+              gap: 8,
+              marginBottom: 14,
+            }}
+          >
+            {profiles.map((p) => (
+              <button
+                key={p.profile_index}
+                className={`btn ${
+                  profileIndex === p.profile_index ? "primary" : ""
+                }`}
+                onClick={() => setProfileIndex(p.profile_index)}
+                disabled={busy}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+          <button
+            className="btn primary"
+            onClick={start}
+            disabled={profileIndex == null || busy}
+          >
+            {busy ? "Starting…" : "Start pairing"}
+          </button>
           {error && <div className="error">{error}</div>}
         </div>
       )}

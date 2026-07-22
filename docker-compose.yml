@@ -36,6 +36,7 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/wetrakr
       TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID}
       WETRAKR_API_URL: ${WETRAKR_API_URL:-https://api.wetrakr.com}
+      NUVIO_PUBLISHABLE_KEY: ${NUVIO_PUBLISHABLE_KEY:-sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN}
       APP_URL: ${APP_URL:-}
     ports:
       - "${WEB_PORT:-8088}:3000"
@@ -50,6 +51,7 @@ services:
       DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/wetrakr
       TRAKT_CLIENT_ID: ${TRAKT_CLIENT_ID}
       WETRAKR_API_URL: ${WETRAKR_API_URL:-https://api.wetrakr.com}
+      NUVIO_PUBLISHABLE_KEY: ${NUVIO_PUBLISHABLE_KEY:-sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN}
       HISTORY_INTERVAL: "300"
       WATCH_INTERVAL: "60"
       LOG_LEVEL: "INFO"

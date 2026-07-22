@@ -3,7 +3,9 @@
 import { use, useCallback, useEffect, useState } from "react";
 
 type Conn = {
-  trakt_username: string;
+  source: "trakt" | "nuvio";
+  trakt_username: string | null;
+  nuvio_profile_id: number | null;
   wetrakr_username: string | null;
   live_enabled: boolean;
   last_watched_at: string | null;
@@ -24,6 +26,8 @@ function ago(iso: string | null): string {
 const ERROR_TEXT: Record<string, string> = {
   wetrakr_auth:
     "WeTrakr rejected the token — pairing on another device may have rotated it. Disconnect here and pair again.",
+  nuvio_auth:
+    "Nuvio rejected the saved login — your password may have changed. Disconnect here and connect again.",
   trakt_403:
     "Your Trakt profile is set to private, so nothing can be read. Set it back to public in Trakt → Settings.",
   trakt_404: "Trakt no longer finds this username.",
@@ -82,6 +86,8 @@ export default function ManagePage({
     setGone(true);
   }
 
+  const isNuvio = conn?.source === "nuvio";
+
   return (
     <div className="wrap manage">
       <a className="brand" href="/">
@@ -113,17 +119,23 @@ export default function ManagePage({
 
           <div className="status-card">
             <div className="status-row">
-              <span className="k">Trakt profile</span>
-              <span className="v">{conn.trakt_username}</span>
+              <span className="k">Source</span>
+              <span className="v">
+                {isNuvio
+                  ? `Nuvio · profile ${conn.nuvio_profile_id ?? "?"}`
+                  : `Trakt · ${conn.trakt_username ?? "—"}`}
+              </span>
             </div>
             <div className="status-row">
               <span className="k">WeTrakr account</span>
               <span className="v">{conn.wetrakr_username ?? "—"}</span>
             </div>
-            <div className="status-row">
-              <span className="k">Live &ldquo;now playing&rdquo;</span>
-              <span className="v">{conn.live_enabled ? "on" : "off"}</span>
-            </div>
+            {!isNuvio && (
+              <div className="status-row">
+                <span className="k">Live &ldquo;now playing&rdquo;</span>
+                <span className="v">{conn.live_enabled ? "on" : "off"}</span>
+              </div>
+            )}
             <div className="status-row">
               <span className="k">Last sync</span>
               <span className="v">{ago(conn.last_synced_at)}</span>
@@ -141,9 +153,13 @@ export default function ManagePage({
           </div>
 
           <div className="manage-actions">
-            <button className="btn" onClick={toggleLive} disabled={busy}>
-              {conn.live_enabled ? "Turn live status off" : "Turn live status on"}
-            </button>
+            {!isNuvio && (
+              <button className="btn" onClick={toggleLive} disabled={busy}>
+                {conn.live_enabled
+                  ? "Turn live status off"
+                  : "Turn live status on"}
+              </button>
+            )}
             <button className="btn danger" onClick={disconnect} disabled={busy}>
               Disconnect &amp; delete
             </button>

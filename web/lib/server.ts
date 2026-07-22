@@ -4,29 +4,52 @@ import { Pool } from "pg";
 
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID!;
 const WETRAKR_BASE = process.env.WETRAKR_API_URL ?? "https://api.wetrakr.com";
+const NUVIO_BASE = process.env.NUVIO_API_URL ?? "https://api.nuvio.tv";
+const NUVIO_KEY =
+  process.env.NUVIO_PUBLISHABLE_KEY ??
+  "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN";
 const UA = "WeTrakr-Kodi/1.1.9";
 
 // ── Postgres ─────────────────────────────────────────────────────
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
+export type Source = "trakt" | "nuvio";
+
 export async function insertPairing(p: {
-  trakt_username: string;
+  source: Source;
+  trakt_username?: string | null;
+  nuvio_refresh_token?: string | null;
+  nuvio_profile_id?: number | null;
   live_enabled: boolean;
   device_code: string;
   expires_at: string;
 }): Promise<{ id: string }> {
   const r = await pool.query(
-    `insert into pairings (trakt_username, live_enabled, device_code, expires_at)
-     values ($1, $2, $3, $4) returning id`,
-    [p.trakt_username, p.live_enabled, p.device_code, p.expires_at]
+    `insert into pairings
+       (source, trakt_username, nuvio_refresh_token, nuvio_profile_id,
+        live_enabled, device_code, expires_at)
+     values ($1, $2, $3, $4, $5, $6, $7)
+     returning id`,
+    [
+      p.source,
+      p.trakt_username ?? null,
+      p.nuvio_refresh_token ?? null,
+      p.nuvio_profile_id ?? null,
+      p.live_enabled,
+      p.device_code,
+      p.expires_at,
+    ]
   );
   return r.rows[0];
 }
 
 export type Pairing = {
   id: string;
-  trakt_username: string;
+  source: Source;
+  trakt_username: string | null;
+  nuvio_refresh_token: string | null;
+  nuvio_profile_id: number | null;
   live_enabled: boolean;
   device_code: string;
   expires_at: string;
@@ -34,7 +57,8 @@ export type Pairing = {
 
 export async function getPairing(id: string): Promise<Pairing | null> {
   const r = await pool.query(
-    `select id, trakt_username, live_enabled, device_code, expires_at
+    `select id, source, trakt_username, nuvio_refresh_token, nuvio_profile_id,
+            live_enabled, device_code, expires_at
      from pairings where id = $1`,
     [id]
   );
@@ -46,21 +70,37 @@ export async function deletePairing(id: string): Promise<void> {
 }
 
 export async function insertConnection(c: {
-  trakt_username: string;
+  source: Source;
+  trakt_username?: string | null;
+  nuvio_refresh_token?: string | null;
+  nuvio_profile_id?: number | null;
   wetrakr_token: string;
   wetrakr_username: string | null;
   live_enabled: boolean;
 }): Promise<{ manage_token: string }> {
   const r = await pool.query(
-    `insert into connections (trakt_username, wetrakr_token, wetrakr_username, live_enabled)
-     values ($1, $2, $3, $4) returning manage_token`,
-    [c.trakt_username, c.wetrakr_token, c.wetrakr_username, c.live_enabled]
+    `insert into connections
+       (source, trakt_username, nuvio_refresh_token, nuvio_profile_id,
+        wetrakr_token, wetrakr_username, live_enabled)
+     values ($1, $2, $3, $4, $5, $6, $7)
+     returning manage_token`,
+    [
+      c.source,
+      c.trakt_username ?? null,
+      c.nuvio_refresh_token ?? null,
+      c.nuvio_profile_id ?? null,
+      c.wetrakr_token,
+      c.wetrakr_username,
+      c.live_enabled,
+    ]
   );
   return r.rows[0];
 }
 
 export type ManageConn = {
-  trakt_username: string;
+  source: Source;
+  trakt_username: string | null;
+  nuvio_profile_id: number | null;
   wetrakr_username: string | null;
   live_enabled: boolean;
   last_watched_at: string | null;
@@ -73,8 +113,8 @@ export async function getConnectionByManageToken(
   token: string
 ): Promise<ManageConn | null> {
   const r = await pool.query(
-    `select trakt_username, wetrakr_username, live_enabled,
-            last_watched_at, last_synced_at, last_error, created_at
+    `select source, trakt_username, nuvio_profile_id, wetrakr_username,
+            live_enabled, last_watched_at, last_synced_at, last_error, created_at
      from connections where manage_token = $1`,
     [token]
   );
@@ -116,6 +156,67 @@ export async function checkTraktProfile(
   if (r.status === 403) return "private";
   if (!r.ok) throw new Error(`trakt: ${r.status}`);
   return "ok";
+}
+
+// ── Nuvio: sign in + list profiles (public API, Supabase-backed) ──
+
+export type NuvioProfile = {
+  profile_index: number;
+  name: string;
+  avatar_color_hex: string | null;
+};
+
+function nuvioHeaders(accessToken?: string): Record<string, string> {
+  const h: Record<string, string> = {
+    "Content-Type": "application/json",
+    apikey: NUVIO_KEY,
+    "User-Agent": UA,
+  };
+  if (accessToken) h["Authorization"] = `Bearer ${accessToken}`;
+  return h;
+}
+
+export async function nuvioSignIn(
+  email: string,
+  password: string
+): Promise<{ access_token: string; refresh_token: string }> {
+  const r = await fetch(`${NUVIO_BASE}/auth/v1/token?grant_type=password`, {
+    method: "POST",
+    headers: nuvioHeaders(),
+    body: JSON.stringify({ email, password }),
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error("nuvio_login");
+  const d = await r.json();
+  if (
+    typeof d.access_token !== "string" ||
+    typeof d.refresh_token !== "string"
+  ) {
+    throw new Error("nuvio_login");
+  }
+  return { access_token: d.access_token, refresh_token: d.refresh_token };
+}
+
+export async function nuvioListProfiles(
+  accessToken: string
+): Promise<NuvioProfile[]> {
+  const r = await fetch(`${NUVIO_BASE}/rest/v1/rpc/sync_pull_profiles`, {
+    method: "POST",
+    headers: nuvioHeaders(accessToken),
+    body: "{}",
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error("nuvio_profiles");
+  const rows = (await r.json()) as Array<Record<string, unknown>>;
+  return rows
+    .map((p) => ({
+      profile_index: Number(p.profile_index),
+      name: String(p.name ?? `Profile ${p.profile_index}`),
+      avatar_color_hex:
+        typeof p.avatar_color_hex === "string" ? p.avatar_color_hex : null,
+    }))
+    .filter((p) => Number.isInteger(p.profile_index))
+    .sort((a, b) => a.profile_index - b.profile_index);
 }
 
 // ── WeTrakr: device-code flow (unofficial, from the Kodi add-on) ──
