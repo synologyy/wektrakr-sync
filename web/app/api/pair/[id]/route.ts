@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
 import {
-  sbDelete,
-  sbInsert,
-  sbSelect,
+  deletePairing,
+  getPairing,
+  insertConnection,
   wetrakrPollToken,
 } from "@/lib/server";
 
@@ -19,20 +19,12 @@ export async function GET(
     return NextResponse.json({ error: "invalid_id" }, { status: 400 });
   }
 
-  const rows = await sbSelect<{
-    id: string;
-    trakt_username: string;
-    live_enabled: boolean;
-    device_code: string;
-    expires_at: string;
-  }>("pairings", `id=eq.${id}&select=*`);
-
-  const pairing = rows[0];
+  const pairing = await getPairing(id);
   if (!pairing) {
     return NextResponse.json({ status: "expired" });
   }
   if (new Date(pairing.expires_at).getTime() < Date.now()) {
-    await sbDelete("pairings", `id=eq.${id}`);
+    await deletePairing(id);
     return NextResponse.json({ status: "expired" });
   }
 
@@ -42,17 +34,17 @@ export async function GET(
     return NextResponse.json({ status: "pending" });
   }
   if (poll.status === "expired") {
-    await sbDelete("pairings", `id=eq.${id}`);
+    await deletePairing(id);
     return NextResponse.json({ status: "expired" });
   }
 
-  const conn = await sbInsert<{ manage_token: string }>("connections", {
+  const conn = await insertConnection({
     trakt_username: pairing.trakt_username,
     wetrakr_token: poll.access_token,
     wetrakr_username: poll.username ?? null,
     live_enabled: pairing.live_enabled,
   });
-  await sbDelete("pairings", `id=eq.${id}`);
+  await deletePairing(id);
 
   const base = process.env.APP_URL?.replace(/\/+$/, "");
   return NextResponse.json({

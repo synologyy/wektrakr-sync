@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-WeTrakr Relay — Sync-Worker
+WeTrakr Relay — sync worker
 ===========================
 
-Läuft dauerhaft auf eigener Hardware (Docker). Holt alle Verbindungen aus
-Supabase und synct pro Verbindung:
+Runs continuously (Docker). Reads all connections from Postgres and, per
+connection, syncs:
 
-  - Watch-History (öffentliches Trakt-Profil -> WeTrakr scrobble), alle
-    HISTORY_INTERVAL Sekunden
-  - Now Playing (öffentlicher /watching-Endpoint -> WeTrakr playing), alle
-    WATCH_INTERVAL Sekunden, nur für Verbindungen mit live_enabled
+  - Watch history (public Trakt profile -> WeTrakr scrobble), every
+    HISTORY_INTERVAL seconds
+  - Now playing (public /watching endpoint -> WeTrakr playing), every
+    WATCH_INTERVAL seconds, only for connections with live_enabled
 
-Kein Trakt-OAuth: gelesen werden ausschließlich öffentliche Profile über
-die Client-ID. Der WeTrakr-Teil nutzt den inoffiziellen Kodi-Webhook
-(siehe github.com/wetrakr/wetrakr-kodi) — kann sich jederzeit ändern.
+No Trakt OAuth: only public profiles are read, via the Client ID. The
+WeTrakr part uses the unofficial Kodi webhook (see
+github.com/wetrakr/wetrakr-kodi) — it can change at any time.
 """
 
 import json
@@ -22,14 +22,15 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
+import psycopg2
+import psycopg2.extras
 import requests
 
 TRAKT_BASE = "https://api.trakt.tv"
 WETRAKR_BASE = os.environ.get("WETRAKR_API_URL", "https://api.wetrakr.com")
 TRAKT_CLIENT_ID = os.environ["TRAKT_CLIENT_ID"]
 
-SUPABASE_URL = os.environ["SUPABASE_URL"].rstrip("/")
-SUPABASE_KEY = os.environ["SUPABASE_SERVICE_KEY"]
+DATABASE_URL = os.environ["DATABASE_URL"]
 
 HISTORY_INTERVAL = int(os.environ.get("HISTORY_INTERVAL", "300"))
 WATCH_INTERVAL = int(os.environ.get("WATCH_INTERVAL", "60"))
@@ -45,44 +46,66 @@ logging.basicConfig(
 log = logging.getLogger("relay")
 
 
-# ─── Supabase (PostgREST) ─────────────────────────────────────────
+# ─── Postgres ─────────────────────────────────────────────────────
 
-def sb_headers(extra=None):
-    h = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-    }
-    if extra:
-        h.update(extra)
-    return h
+_conn = None
+
+
+def db():
+    global _conn
+    if _conn is None or _conn.closed:
+        _conn = psycopg2.connect(DATABASE_URL)
+        _conn.autocommit = True
+    return _conn
+
+
+def _reset_db():
+    global _conn
+    try:
+        if _conn is not None:
+            _conn.close()
+    except Exception:
+        pass
+    _conn = None
 
 
 def fetch_connections():
-    r = requests.get(
-        f"{SUPABASE_URL}/rest/v1/connections",
-        headers=sb_headers(),
-        params={"select": "*", "order": "created_at.asc"},
-        timeout=20,
-    )
-    r.raise_for_status()
-    return r.json()
+    try:
+        with db().cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("select * from connections order by created_at asc")
+            rows = cur.fetchall()
+    except psycopg2.Error:
+        _reset_db()
+        raise
+    for row in rows:
+        lw = row.get("last_watched_at")
+        if isinstance(lw, datetime):
+            row["last_watched_at"] = lw.astimezone(timezone.utc).strftime(
+                "%Y-%m-%dT%H:%M:%S.000Z")
+    return rows
 
 
 def update_connection(conn_id, patch):
-    r = requests.patch(
-        f"{SUPABASE_URL}/rest/v1/connections",
-        headers=sb_headers({"Prefer": "return=minimal"}),
-        params={"id": f"eq.{conn_id}"},
-        json=patch,
-        timeout=20,
-    )
-    if r.status_code >= 300:
-        log.warning("Supabase-Update fehlgeschlagen (%s): %s",
-                    r.status_code, r.text[:200])
+    if not patch:
+        return
+    cols = list(patch.keys())
+    set_clause = ", ".join(f"{c} = %s" for c in cols)
+    values = [
+        psycopg2.extras.Json(patch[c]) if isinstance(patch[c], (list, dict))
+        else patch[c]
+        for c in cols
+    ]
+    values.append(conn_id)
+    try:
+        with db().cursor() as cur:
+            cur.execute(
+                f"update connections set {set_clause} where id = %s", values)
+    except psycopg2.Error as e:
+        log.warning("DB-Update fehlgeschlagen: %s", e)
+        _reset_db()
 
 
-# ─── Trakt (nur öffentliche Endpoints) ────────────────────────────
+# ─── Trakt (public endpoints only) ────────────────────────────────
 
 def trakt_headers():
     return {
@@ -207,7 +230,7 @@ def describe(p):
     return f"{p['show_title']} S{p['season']:02d}E{p['episode']:02d}"
 
 
-# ─── Sync pro Verbindung ─────────────────────────────────────────
+# ─── Sync per connection ─────────────────────────────────────────
 
 def sync_history(conn):
     username = conn["trakt_username"]
@@ -223,7 +246,7 @@ def sync_history(conn):
             "last_error": str(e),
             "last_synced_at": datetime.now(timezone.utc).isoformat(),
         })
-        log.warning("[%s] History nicht lesbar: %s", username, e)
+        log.warning("[%s] history not readable: %s", username, e)
         return
 
     seen = set(conn.get("seen_ids") or [])
@@ -243,7 +266,7 @@ def sync_history(conn):
             ok = send_to_wetrakr(conn["wetrakr_token"], payload)
         except PermissionError:
             patch["last_error"] = "wetrakr_auth"
-            log.warning("[%s] WeTrakr-Token abgelehnt", username)
+            log.warning("[%s] WeTrakr token rejected", username)
             break
         if ok:
             seen.add(item["id"])
@@ -275,16 +298,16 @@ def sync_watching(conn):
     try:
         if send_to_wetrakr(conn["wetrakr_token"], payload):
             if conn.get("watching_key") != key:
-                log.info("[%s] läuft: %s", username, describe(payload))
+                log.info("[%s] playing: %s", username, describe(payload))
                 update_connection(conn["id"], {"watching_key": key})
     except PermissionError:
         update_connection(conn["id"], {"last_error": "wetrakr_auth"})
 
 
-# ─── Hauptschleife ───────────────────────────────────────────────
+# ─── Main loop ───────────────────────────────────────────────────
 
 def run():
-    log.info("Relay-Worker läuft — History %ds, Now Playing %ds",
+    log.info("Relay worker running — history %ds, now playing %ds",
              HISTORY_INTERVAL, WATCH_INTERVAL)
     last_history = 0.0
 
@@ -293,17 +316,17 @@ def run():
         try:
             conns = fetch_connections()
         except Exception:
-            log.exception("Supabase nicht erreichbar")
+            log.exception("database unreachable")
             time.sleep(WATCH_INTERVAL)
             continue
 
         if now - last_history >= HISTORY_INTERVAL:
-            log.info("History-Durchlauf: %d Verbindungen", len(conns))
+            log.info("history run: %d connections", len(conns))
             for c in conns:
                 try:
                     sync_history(c)
                 except Exception:
-                    log.exception("[%s] History-Sync fehlgeschlagen",
+                    log.exception("[%s] history sync failed",
                                   c["trakt_username"])
             last_history = now
 
@@ -312,7 +335,7 @@ def run():
                 try:
                     sync_watching(c)
                 except Exception:
-                    log.exception("[%s] Watching-Poll fehlgeschlagen",
+                    log.exception("[%s] watching poll failed",
                                   c["trakt_username"])
 
         time.sleep(WATCH_INTERVAL)

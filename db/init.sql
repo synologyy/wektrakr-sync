@@ -1,9 +1,8 @@
--- WeTrakr Relay — Schema
--- Ausführen im Supabase SQL Editor.
+-- WeTrakr Relay — schema (plain Postgres, runs on first DB init)
 
 create extension if not exists pgcrypto;
 
--- Laufende Pairing-Versuche (Device-Code-Flow, kurzlebig)
+-- Short-lived pairing attempts (device-code flow)
 create table if not exists pairings (
   id             uuid primary key default gen_random_uuid(),
   trakt_username text not null,
@@ -13,7 +12,7 @@ create table if not exists pairings (
   created_at     timestamptz not null default now()
 );
 
--- Aktive Verbindungen
+-- Active connections
 create table if not exists connections (
   id               uuid primary key default gen_random_uuid(),
   trakt_username   text not null,
@@ -30,12 +29,3 @@ create table if not exists connections (
 );
 
 create index if not exists connections_trakt_idx on connections (trakt_username);
-
--- Zugriff nur über den Service-Role-Key (Server & Worker).
--- RLS an, keine Policies => anon/authenticated kommen nicht ran.
-alter table pairings    enable row level security;
-alter table connections enable row level security;
-
--- Aufräumjob für abgelaufene Pairings (optional, braucht pg_cron):
--- select cron.schedule('purge-pairings', '*/15 * * * *',
---   $$delete from pairings where expires_at < now()$$);

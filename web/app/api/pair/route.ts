@@ -1,9 +1,5 @@
 import { NextResponse } from "next/server";
-import {
-  checkTraktProfile,
-  sbInsert,
-  wetrakrDeviceCode,
-} from "@/lib/server";
+import { checkTraktProfile, insertPairing, wetrakrDeviceCode } from "@/lib/server";
 
 export const runtime = "nodejs";
 
@@ -29,7 +25,7 @@ export async function POST(req: Request) {
 
   const code = await wetrakrDeviceCode();
 
-  const pairing = await sbInsert<{ id: string }>("pairings", {
+  const pairing = await insertPairing({
     trakt_username: username,
     live_enabled: Boolean(body.live),
     device_code: code.device_code,

@@ -1,60 +1,101 @@
-// Server-only Helper. Niemals in Client-Komponenten importieren.
+// Server-only helper. Never import from client components.
 
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY!;
+import { Pool } from "pg";
+
 const TRAKT_CLIENT_ID = process.env.TRAKT_CLIENT_ID!;
 const WETRAKR_BASE = process.env.WETRAKR_API_URL ?? "https://api.wetrakr.com";
 const UA = "WeTrakr-Kodi/1.1.9";
 
-// ── Supabase (PostgREST) ─────────────────────────────────────────
+// ── Postgres ─────────────────────────────────────────────────────
 
-function sbHeaders(extra: Record<string, string> = {}) {
-  return {
-    apikey: SUPABASE_KEY,
-    Authorization: `Bearer ${SUPABASE_KEY}`,
-    "Content-Type": "application/json",
-    ...extra,
-  };
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+
+export async function insertPairing(p: {
+  trakt_username: string;
+  live_enabled: boolean;
+  device_code: string;
+  expires_at: string;
+}): Promise<{ id: string }> {
+  const r = await pool.query(
+    `insert into pairings (trakt_username, live_enabled, device_code, expires_at)
+     values ($1, $2, $3, $4) returning id`,
+    [p.trakt_username, p.live_enabled, p.device_code, p.expires_at]
+  );
+  return r.rows[0];
 }
 
-export async function sbSelect<T>(table: string, query: string): Promise<T[]> {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
-    headers: sbHeaders(),
-    cache: "no-store",
-  });
-  if (!r.ok) throw new Error(`supabase select ${table}: ${r.status}`);
-  return r.json();
+export type Pairing = {
+  id: string;
+  trakt_username: string;
+  live_enabled: boolean;
+  device_code: string;
+  expires_at: string;
+};
+
+export async function getPairing(id: string): Promise<Pairing | null> {
+  const r = await pool.query(
+    `select id, trakt_username, live_enabled, device_code, expires_at
+     from pairings where id = $1`,
+    [id]
+  );
+  return r.rows[0] ?? null;
 }
 
-export async function sbInsert<T>(table: string, row: object): Promise<T> {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
-    method: "POST",
-    headers: sbHeaders({ Prefer: "return=representation" }),
-    body: JSON.stringify(row),
-  });
-  if (!r.ok) throw new Error(`supabase insert ${table}: ${r.status}`);
-  const rows = await r.json();
-  return rows[0];
+export async function deletePairing(id: string): Promise<void> {
+  await pool.query(`delete from pairings where id = $1`, [id]);
 }
 
-export async function sbPatch(table: string, query: string, patch: object) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
-    method: "PATCH",
-    headers: sbHeaders({ Prefer: "return=minimal" }),
-    body: JSON.stringify(patch),
-  });
-  if (!r.ok) throw new Error(`supabase patch ${table}: ${r.status}`);
+export async function insertConnection(c: {
+  trakt_username: string;
+  wetrakr_token: string;
+  wetrakr_username: string | null;
+  live_enabled: boolean;
+}): Promise<{ manage_token: string }> {
+  const r = await pool.query(
+    `insert into connections (trakt_username, wetrakr_token, wetrakr_username, live_enabled)
+     values ($1, $2, $3, $4) returning manage_token`,
+    [c.trakt_username, c.wetrakr_token, c.wetrakr_username, c.live_enabled]
+  );
+  return r.rows[0];
 }
 
-export async function sbDelete(table: string, query: string) {
-  const r = await fetch(`${SUPABASE_URL}/rest/v1/${table}?${query}`, {
-    method: "DELETE",
-    headers: sbHeaders({ Prefer: "return=minimal" }),
-  });
-  if (!r.ok) throw new Error(`supabase delete ${table}: ${r.status}`);
+export type ManageConn = {
+  trakt_username: string;
+  wetrakr_username: string | null;
+  live_enabled: boolean;
+  last_watched_at: string | null;
+  last_synced_at: string | null;
+  last_error: string | null;
+  created_at: string;
+};
+
+export async function getConnectionByManageToken(
+  token: string
+): Promise<ManageConn | null> {
+  const r = await pool.query(
+    `select trakt_username, wetrakr_username, live_enabled,
+            last_watched_at, last_synced_at, last_error, created_at
+     from connections where manage_token = $1`,
+    [token]
+  );
+  return r.rows[0] ?? null;
 }
 
-// ── Trakt: Profil prüfen (nur öffentliche Endpoints) ─────────────
+export async function setConnectionLive(
+  token: string,
+  live: boolean
+): Promise<void> {
+  await pool.query(
+    `update connections set live_enabled = $2 where manage_token = $1`,
+    [token, live]
+  );
+}
+
+export async function deleteConnection(token: string): Promise<void> {
+  await pool.query(`delete from connections where manage_token = $1`, [token]);
+}
+
+// ── Trakt: check profile (public endpoints only) ─────────────────
 
 export async function checkTraktProfile(
   username: string
@@ -77,7 +118,7 @@ export async function checkTraktProfile(
   return "ok";
 }
 
-// ── WeTrakr: Device-Code-Flow (inoffiziell, aus dem Kodi-Addon) ──
+// ── WeTrakr: device-code flow (unofficial, from the Kodi add-on) ──
 
 export type DeviceCode = {
   device_code: string;
@@ -115,7 +156,7 @@ export async function wetrakrPollToken(
   try {
     data = await r.json();
   } catch {
-    /* leerer Body */
+    /* empty body */
   }
   if (typeof data.access_token === "string") {
     return {

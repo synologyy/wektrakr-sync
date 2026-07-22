@@ -21,14 +21,13 @@ Players (Plex / Nuvio / Fusion / …) ──> Trakt (public profile) ──> Rel
 
 Fully self-contained — `docker compose up` needs no external accounts:
 
-| Service     | Role                                                            |
-|-------------|----------------------------------------------------------------|
-| `db`        | Postgres — schema + roles created on first boot                |
-| `postgrest` | PostgREST — the REST API surface the app expects               |
-| `gateway`   | nginx — maps `/rest/v1/*` onto PostgREST                        |
-| `web`       | Next.js — landing page, pairing wizard, manage page            |
-| `worker`    | Python — syncs Trakt → WeTrakr every 5 min (live: every 1 min) |
+| Service  | Role                                                            |
+|----------|----------------------------------------------------------------|
+| `db`     | Postgres — schema created on first boot from `db/init.sql`      |
+| `web`    | Next.js — landing page, pairing wizard, manage page            |
+| `worker` | Python — syncs Trakt → WeTrakr every 5 min (live: every 1 min) |
 
+`web` and `worker` talk to Postgres directly (no ORM, no external API layer).
 Only two things are stored per user: the (public) Trakt username and the WeTrakr
 scrobble token. No login, no password — each connection gets a random manage link.
 
@@ -41,38 +40,30 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Then open `http://<server-ip>:3000` and run the wizard:
+Then open `http://<server-ip>:8088` and run the wizard:
 Trakt username → confirm the WeTrakr code → done.
 
 ### Deploy on a Hetzner Cloud server
 
 ```bash
-# on a fresh Ubuntu box
 curl -fsSL https://get.docker.com | sh
 git clone https://github.com/synologyy/wektrakr-sync.git
 cd wektrakr-sync
-cp .env.example .env && nano .env      # set TRAKT_CLIENT_ID
+cp .env.example .env && nano .env      # set TRAKT_CLIENT_ID (+ POSTGRES_PASSWORD, APP_URL)
 docker compose up -d --build
 ```
 
-Point a domain / reverse proxy at port `3000` if you want HTTPS.
+Point your reverse proxy (Pangolin/newt, nginx, Caddy) at port `8088`.
 
 ## Configuration (`.env`)
 
-| Variable               | Required | Notes                                                            |
-|------------------------|----------|------------------------------------------------------------------|
-| `TRAKT_CLIENT_ID`      | ✅       | One Trakt API app for the whole service (reads public profiles)  |
-| `POSTGRES_PASSWORD`    |          | Postgres superuser password (internal)                           |
-| `PGRST_JWT_SECRET`     |          | Signs the service token; change for production                   |
-| `SUPABASE_SERVICE_KEY` |          | `role=service_role` JWT signed with `PGRST_JWT_SECRET`           |
-| `WEB_PORT`             |          | Host port for the UI (default `3000`)                            |
-| `WETRAKR_API_URL`      |          | WeTrakr API base (unofficial, default `https://api.wetrakr.com`) |
-
-If you change `PGRST_JWT_SECRET`, regenerate the service token:
-
-```bash
-node scripts/gen-service-jwt.mjs "<your-new-secret>"   # → put into SUPABASE_SERVICE_KEY
-```
+| Variable            | Required | Notes                                                            |
+|---------------------|----------|------------------------------------------------------------------|
+| `TRAKT_CLIENT_ID`   | ✅       | One Trakt API app for the whole service (reads public profiles)  |
+| `POSTGRES_PASSWORD` |          | Password for the bundled Postgres                                |
+| `APP_URL`           |          | Public URL for the manage link; blank = auto-detect from browser |
+| `WEB_PORT`          |          | Host port for the UI (default `8088`)                            |
+| `WETRAKR_API_URL`   |          | WeTrakr API base (unofficial, default `https://api.wetrakr.com`) |
 
 ## Notes
 
