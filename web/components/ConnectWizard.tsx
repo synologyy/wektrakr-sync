@@ -170,19 +170,16 @@ export default function ConnectWizard() {
       </div>
 
       {(phase === "input" || phase === "nuvio_profiles") && (
-        <div
-          className="source-tabs"
-          style={{ display: "flex", gap: 8, marginBottom: 16 }}
-        >
+        <div className="source-tabs">
           <button
-            className={`btn ${source === "trakt" ? "primary" : ""}`}
+            className={`tab ${source === "trakt" ? "active" : ""}`}
             onClick={() => pickSource("trakt")}
             disabled={busy}
           >
             Trakt
           </button>
           <button
-            className={`btn ${source === "nuvio" ? "primary" : ""}`}
+            className={`tab ${source === "nuvio" ? "active" : ""}`}
             onClick={() => pickSource("nuvio")}
             disabled={busy}
           >
@@ -235,10 +232,7 @@ export default function ConnectWizard() {
 
       {phase === "input" && source === "nuvio" && (
         <div>
-          <div
-            className="field-row"
-            style={{ flexDirection: "column", gap: 8, alignItems: "stretch" }}
-          >
+          <div className="col-form">
             <input
               type="email"
               placeholder="Nuvio email"
@@ -279,14 +273,7 @@ export default function ConnectWizard() {
       {phase === "nuvio_profiles" && (
         <div>
           <p className="sub">Which Nuvio profile should Relay mirror?</p>
-          <div
-            style={{
-              display: "flex",
-              flexWrap: "wrap",
-              gap: 8,
-              marginBottom: 14,
-            }}
-          >
+          <div className="profiles">
             {profiles.map((p) => (
               <button
                 key={p.profile_index}
