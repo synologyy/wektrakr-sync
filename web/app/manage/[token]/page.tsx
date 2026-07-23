@@ -3,7 +3,7 @@
 import { use, useCallback, useEffect, useState } from "react";
 
 type Conn = {
-  source: "trakt" | "nuvio";
+  source: "trakt" | "nuvio" | "stremio";
   trakt_username: string | null;
   nuvio_profile_id: number | null;
   wetrakr_username: string | null;
@@ -28,6 +28,8 @@ const ERROR_TEXT: Record<string, string> = {
     "WeTrakr rejected the token — pairing on another device may have rotated it. Disconnect here and pair again.",
   nuvio_auth:
     "Nuvio rejected the saved login — your password may have changed. Disconnect here and connect again.",
+  stremio_auth:
+    "Stremio rejected the saved login — your password may have changed. Disconnect here and connect again.",
   trakt_403:
     "Your Trakt profile is set to private, so nothing can be read. Set it back to public in Trakt → Settings.",
   trakt_404: "Trakt no longer finds this username.",
@@ -88,10 +90,20 @@ export default function ManagePage({
 
   const isNuvio = conn?.source === "nuvio";
 
+  function sourceLabel(c: Conn): string {
+    if (c.source === "nuvio") return `Nuvio · profile ${c.nuvio_profile_id ?? "?"}`;
+    if (c.source === "stremio") return "Stremio";
+    return `Trakt · ${c.trakt_username ?? "—"}`;
+  }
+
   return (
     <div className="wrap manage">
       <a className="brand" href="/">
-        WeTrakr <em>Relay</em>
+        <span className="mark">
+          <span className="we">we</span>
+          <span className="tr">trakr</span>
+        </span>
+        <em>Relay</em>
       </a>
 
       {gone ? (
@@ -120,11 +132,7 @@ export default function ManagePage({
           <div className="status-card">
             <div className="status-row">
               <span className="k">Source</span>
-              <span className="v">
-                {isNuvio
-                  ? `Nuvio · profile ${conn.nuvio_profile_id ?? "?"}`
-                  : `Trakt · ${conn.trakt_username ?? "—"}`}
-              </span>
+              <span className="v">{sourceLabel(conn)}</span>
             </div>
             <div className="status-row">
               <span className="k">WeTrakr account</span>

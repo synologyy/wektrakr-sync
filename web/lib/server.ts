@@ -8,19 +8,21 @@ const NUVIO_BASE = process.env.NUVIO_API_URL ?? "https://api.nuvio.tv";
 const NUVIO_KEY =
   process.env.NUVIO_PUBLISHABLE_KEY ??
   "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN";
+const STREMIO_BASE = process.env.STREMIO_API_URL ?? "https://api.strem.io/api";
 const UA = "WeTrakr-Kodi/1.1.9";
 
 // ── Postgres ─────────────────────────────────────────────────────
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL });
 
-export type Source = "trakt" | "nuvio";
+export type Source = "trakt" | "nuvio" | "stremio";
 
 export async function insertPairing(p: {
   source: Source;
   trakt_username?: string | null;
   nuvio_refresh_token?: string | null;
   nuvio_profile_id?: number | null;
+  stremio_auth_key?: string | null;
   live_enabled: boolean;
   device_code: string;
   expires_at: string;
@@ -28,14 +30,15 @@ export async function insertPairing(p: {
   const r = await pool.query(
     `insert into pairings
        (source, trakt_username, nuvio_refresh_token, nuvio_profile_id,
-        live_enabled, device_code, expires_at)
-     values ($1, $2, $3, $4, $5, $6, $7)
+        stremio_auth_key, live_enabled, device_code, expires_at)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)
      returning id`,
     [
       p.source,
       p.trakt_username ?? null,
       p.nuvio_refresh_token ?? null,
       p.nuvio_profile_id ?? null,
+      p.stremio_auth_key ?? null,
       p.live_enabled,
       p.device_code,
       p.expires_at,
@@ -50,6 +53,7 @@ export type Pairing = {
   trakt_username: string | null;
   nuvio_refresh_token: string | null;
   nuvio_profile_id: number | null;
+  stremio_auth_key: string | null;
   live_enabled: boolean;
   device_code: string;
   expires_at: string;
@@ -58,7 +62,7 @@ export type Pairing = {
 export async function getPairing(id: string): Promise<Pairing | null> {
   const r = await pool.query(
     `select id, source, trakt_username, nuvio_refresh_token, nuvio_profile_id,
-            live_enabled, device_code, expires_at
+            stremio_auth_key, live_enabled, device_code, expires_at
      from pairings where id = $1`,
     [id]
   );
@@ -74,6 +78,7 @@ export async function insertConnection(c: {
   trakt_username?: string | null;
   nuvio_refresh_token?: string | null;
   nuvio_profile_id?: number | null;
+  stremio_auth_key?: string | null;
   wetrakr_token: string;
   wetrakr_username: string | null;
   live_enabled: boolean;
@@ -81,14 +86,15 @@ export async function insertConnection(c: {
   const r = await pool.query(
     `insert into connections
        (source, trakt_username, nuvio_refresh_token, nuvio_profile_id,
-        wetrakr_token, wetrakr_username, live_enabled)
-     values ($1, $2, $3, $4, $5, $6, $7)
+        stremio_auth_key, wetrakr_token, wetrakr_username, live_enabled)
+     values ($1, $2, $3, $4, $5, $6, $7, $8)
      returning manage_token`,
     [
       c.source,
       c.trakt_username ?? null,
       c.nuvio_refresh_token ?? null,
       c.nuvio_profile_id ?? null,
+      c.stremio_auth_key ?? null,
       c.wetrakr_token,
       c.wetrakr_username,
       c.live_enabled,
@@ -217,6 +223,24 @@ export async function nuvioListProfiles(
     }))
     .filter((p) => Number.isInteger(p.profile_index))
     .sort((a, b) => a.profile_index - b.profile_index);
+}
+
+// ── Stremio: sign in (api.strem.io) ──────────────────────────────
+
+export async function stremioSignIn(
+  email: string,
+  password: string
+): Promise<{ auth_key: string }> {
+  const r = await fetch(`${STREMIO_BASE}/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "User-Agent": UA },
+    body: JSON.stringify({ email, password }),
+    cache: "no-store",
+  });
+  const d = await r.json().catch(() => ({}));
+  const authKey = d?.result?.authKey;
+  if (typeof authKey !== "string" || !authKey) throw new Error("stremio_login");
+  return { auth_key: authKey };
 }
 
 // ── WeTrakr: device-code flow (unofficial, from the Kodi add-on) ──

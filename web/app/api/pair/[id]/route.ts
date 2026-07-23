@@ -43,6 +43,7 @@ export async function GET(
     trakt_username: pairing.trakt_username,
     nuvio_refresh_token: pairing.nuvio_refresh_token,
     nuvio_profile_id: pairing.nuvio_profile_id,
+    stremio_auth_key: pairing.stremio_auth_key,
     wetrakr_token: poll.access_token,
     wetrakr_username: poll.username ?? null,
     live_enabled: pairing.live_enabled,

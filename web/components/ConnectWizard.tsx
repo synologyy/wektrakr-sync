@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 
 type Phase = "input" | "nuvio_profiles" | "pairing" | "done";
-type Source = "trakt" | "nuvio";
+type Source = "trakt" | "nuvio" | "stremio";
 type NuvioProfile = {
   profile_index: number;
   name: string;
@@ -17,9 +17,11 @@ const ERRORS: Record<string, string> = {
     "Trakt doesn't know that username. Check the slug in your profile URL — it can differ from your display name.",
   private:
     "That profile is private, so Relay can't read its history. Set it to public in Trakt → Settings → Privacy, then try again.",
-  invalid_login: "Enter your Nuvio email and password.",
+  invalid_login: "Enter your email and password.",
   nuvio_login:
     "Nuvio didn't accept those credentials. Check your email and password and try again.",
+  stremio_login:
+    "Stremio didn't accept those credentials. Check your email and password and try again.",
   expired:
     "The pairing code expired before it was entered. Start over to get a fresh one.",
   network: "Couldn't reach the server. Check your connection and try again.",
@@ -33,7 +35,7 @@ export default function ConnectWizard() {
   const [username, setUsername] = useState("");
   const [live, setLive] = useState(false);
 
-  // Nuvio
+  // Nuvio / Stremio (shared email + password)
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [profiles, setProfiles] = useState<NuvioProfile[]>([]);
@@ -90,7 +92,7 @@ export default function ConnectWizard() {
     }
   }
 
-  // Both sources: start the WeTrakr pairing
+  // All sources: start the WeTrakr pairing
   async function start() {
     setError(null);
     setBusy(true);
@@ -98,6 +100,8 @@ export default function ConnectWizard() {
       const body =
         source === "trakt"
           ? { source, trakt_username: username, live }
+          : source === "stremio"
+          ? { source, email, password, live }
           : { source, email, password, profile_index: profileIndex };
       const r = await fetch("/api/pair", {
         method: "POST",
@@ -155,6 +159,19 @@ export default function ConnectWizard() {
   const canContinue =
     source === "trakt" ? !!username.trim() : !!email.trim() && !!password;
 
+  const liveCheckbox = (
+    <label className="check">
+      <input
+        type="checkbox"
+        checked={live}
+        onChange={(e) => setLive(e.target.checked)}
+      />
+      <span>
+        Also mirror my live &ldquo;now playing&rdquo; status while you watch
+      </span>
+    </label>
+  );
+
   return (
     <div className="wizard">
       <h2>Connect in under a minute</h2>
@@ -185,6 +202,13 @@ export default function ConnectWizard() {
           >
             Nuvio
           </button>
+          <button
+            className={`tab ${source === "stremio" ? "active" : ""}`}
+            onClick={() => pickSource("stremio")}
+            disabled={busy}
+          >
+            Stremio
+          </button>
         </div>
       )}
 
@@ -211,17 +235,7 @@ export default function ConnectWizard() {
               {busy ? "Checking…" : "Start pairing"}
             </button>
           </div>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={live}
-              onChange={(e) => setLive(e.target.checked)}
-            />
-            <span>
-              Also mirror my live &ldquo;now playing&rdquo; status (polls Trakt
-              once a minute while you watch)
-            </span>
-          </label>
+          {liveCheckbox}
           <p className="hint">
             Your profile needs to be public, and the username is the slug from
             your profile URL — trakt.tv/users/<b>this-part</b>.
@@ -265,6 +279,46 @@ export default function ConnectWizard() {
             Relay signs in to read your Nuvio watch history. Your password is
             used only to sign in and is never stored — only a refresh token is
             kept.
+          </p>
+          {error && <div className="error">{error}</div>}
+        </div>
+      )}
+
+      {phase === "input" && source === "stremio" && (
+        <div>
+          <div className="col-form">
+            <input
+              type="email"
+              placeholder="Stremio email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              aria-label="Stremio email"
+              autoComplete="email"
+              spellCheck={false}
+            />
+            <input
+              type="password"
+              placeholder="Stremio password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && canContinue && !busy) start();
+              }}
+              aria-label="Stremio password"
+              autoComplete="current-password"
+            />
+            <button
+              className="btn primary"
+              onClick={start}
+              disabled={!canContinue || busy}
+            >
+              {busy ? "Signing in…" : "Start pairing"}
+            </button>
+          </div>
+          {liveCheckbox}
+          <p className="hint">
+            Relay signs in to read your Stremio library. Your password is used
+            only to sign in and is never stored — only an auth token is kept.
           </p>
           {error && <div className="error">{error}</div>}
         </div>

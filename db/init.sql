@@ -5,10 +5,11 @@ create extension if not exists pgcrypto;
 -- Short-lived pairing attempts (device-code flow)
 create table if not exists pairings (
   id                  uuid primary key default gen_random_uuid(),
-  source              text not null default 'trakt',   -- 'trakt' | 'nuvio'
+  source              text not null default 'trakt',   -- 'trakt' | 'nuvio' | 'stremio'
   trakt_username      text,
   nuvio_refresh_token text,
   nuvio_profile_id    integer,
+  stremio_auth_key    text,
   live_enabled        boolean not null default false,
   device_code         text not null,
   expires_at          timestamptz not null,
@@ -18,10 +19,11 @@ create table if not exists pairings (
 -- Active connections
 create table if not exists connections (
   id                  uuid primary key default gen_random_uuid(),
-  source              text not null default 'trakt',   -- 'trakt' | 'nuvio'
+  source              text not null default 'trakt',   -- 'trakt' | 'nuvio' | 'stremio'
   trakt_username      text,
   nuvio_refresh_token text,
   nuvio_profile_id    integer,
+  stremio_auth_key    text,
   wetrakr_token       text not null,
   wetrakr_username    text,
   live_enabled        boolean not null default false,

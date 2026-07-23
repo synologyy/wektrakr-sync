@@ -7,8 +7,10 @@ Runs continuously (Docker). Reads all connections from Postgres and, per
 connection, mirrors watch history to WeTrakr.
 
 Sources:
-  - trakt: public Trakt profile (history + optional live now-playing)
-  - nuvio: Nuvio Sync API (watch history only), authenticated per user
+  - trakt:   public Trakt profile (history + optional live now-playing)
+  - nuvio:   Nuvio Sync API (watch history only), authenticated per user
+  - stremio: Stremio account library (history + live now-playing via
+             playback-position polling), authenticated per user
 
 No Trakt OAuth is used. The WeTrakr part uses the unofficial Kodi webhook
 (see github.com/wetrakr/wetrakr-kodi) — it can change at any time.
@@ -34,6 +36,8 @@ NUVIO_KEY = os.environ.get(
     "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN",
 )
 
+STREMIO_BASE = os.environ.get("STREMIO_API_URL", "https://api.strem.io/api")
+
 DATABASE_URL = os.environ["DATABASE_URL"]
 
 HISTORY_INTERVAL = int(os.environ.get("HISTORY_INTERVAL", "300"))
@@ -55,8 +59,11 @@ def now_iso():
 
 
 def conn_label(conn):
-    if conn.get("source") == "nuvio":
+    src = conn.get("source")
+    if src == "nuvio":
         return f"nuvio#{conn.get('nuvio_profile_id') or 1}"
+    if src == "stremio":
+        return f"stremio#{str(conn.get('id'))[:8]}"
     return conn.get("trakt_username") or str(conn.get("id"))
 
 
@@ -261,6 +268,96 @@ def build_payload_nuvio(item, event="scrobble", progress=100.0):
     return None
 
 
+# ─── Stremio account (per-user auth, history + live) ──────────────
+
+def stremio_call(method, body):
+    r = requests.post(
+        f"{STREMIO_BASE}/{method}", json=body,
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+        timeout=30,
+    )
+    data = r.json() if r.text.strip() else {}
+    err = data.get("error")
+    if err:
+        if err.get("wrongPass") or err.get("code") in (1, 2, 3):
+            raise PermissionError("stremio_auth")
+        raise RuntimeError(f"stremio {method}: {err}")
+    return data.get("result")
+
+
+def stremio_recent(auth_key, limit=15):
+    meta = stremio_call(
+        "datastoreMeta", {"authKey": auth_key, "collection": "libraryItem"}) or []
+    pairs = [(m[0], m[1]) for m in meta if isinstance(m, list) and len(m) >= 2]
+    pairs.sort(key=lambda x: x[1] or 0, reverse=True)
+    ids = [p[0] for p in pairs[:limit]]
+    if not ids:
+        return []
+    return stremio_call("datastoreGet", {
+        "authKey": auth_key, "collection": "libraryItem", "all": False, "ids": ids,
+    }) or []
+
+
+def stremio_ids(cid):
+    ids = {"tmdb": None, "imdb": None, "tvdb": None}
+    if not cid:
+        return ids
+    cid = str(cid)
+    base = cid.split(":")[0]
+    if base.startswith("tt"):
+        ids["imdb"] = base
+    elif ":" in cid:
+        pfx, _, val = cid.partition(":")
+        if pfx == "tmdb":
+            try:
+                ids["tmdb"] = int(val)
+            except ValueError:
+                pass
+        elif pfx == "imdb":
+            ids["imdb"] = val or None
+        elif pfx == "tvdb":
+            try:
+                ids["tvdb"] = int(val)
+            except ValueError:
+                pass
+    return ids
+
+
+def stremio_se(video_id):
+    parts = str(video_id or "").split(":")
+    try:
+        return int(parts[-2]), int(parts[-1])
+    except (ValueError, IndexError):
+        return 0, 0
+
+
+def build_payload_stremio(item, event="scrobble", progress=100.0):
+    cid = item.get("_id") or item.get("id")
+    ids = stremio_ids(cid)
+    if not any(ids.values()):
+        return None
+    ctype = item.get("type")
+    st = item.get("state") or {}
+    if ctype == "movie":
+        return {
+            "event": event, "media_type": "movie",
+            "title": item.get("name", ""), "year": 0,
+            "ids": ids, "progress": round(progress, 1),
+        }
+    if ctype == "series":
+        season, episode = stremio_se(st.get("videoId"))
+        return {
+            "event": event, "media_type": "episode",
+            "title": "",
+            "show_title": item.get("name", ""),
+            "show_ids": ids,
+            "season": season, "episode": episode,
+            "ids": {"tmdb": None, "imdb": None, "tvdb": None},
+            "progress": round(progress, 1),
+        }
+    return None
+
+
 # ─── Mapping & WeTrakr ────────────────────────────────────────────
 
 def map_ids(trakt_ids):
@@ -424,6 +521,50 @@ def sync_history_nuvio(conn):
     update_connection(conn["id"], patch)
 
 
+def sync_history_stremio(conn):
+    label = conn_label(conn)
+    try:
+        items = stremio_recent(conn["stremio_auth_key"])
+    except PermissionError:
+        update_connection(conn["id"], {
+            "last_error": "stremio_auth", "last_synced_at": now_iso()})
+        log.warning("[%s] Stremio auth failed", label)
+        return
+    except requests.RequestException:
+        return
+
+    patch = {"last_synced_at": now_iso(), "last_error": None}
+    seen = set(conn.get("seen_ids") or [])
+    for it in items:
+        st = it.get("state") or {}
+        off = st.get("timeOffset") or 0
+        dur = st.get("duration") or 0
+        done = bool(st.get("flaggedWatched")) or (dur and off / dur >= 0.9)
+        if not done:
+            continue
+        key = "s|%s|%s|%s" % (
+            it.get("_id") or it.get("id"), st.get("videoId"), st.get("lastWatched"))
+        if key in seen:
+            continue
+        payload = build_payload_stremio(it)
+        if not payload:
+            seen.add(key)
+            continue
+        try:
+            ok = send_to_wetrakr(conn["wetrakr_token"], payload)
+        except PermissionError:
+            patch["last_error"] = "wetrakr_auth"
+            log.warning("[%s] WeTrakr token rejected", label)
+            break
+        if ok:
+            seen.add(key)
+            log.info("[%s] → %s", label, describe(payload))
+        time.sleep(SEND_DELAY)
+
+    patch["seen_ids"] = list(seen)[-SEEN_CAP:]
+    update_connection(conn["id"], patch)
+
+
 def sync_watching(conn):
     username = conn["trakt_username"]
     try:
@@ -450,6 +591,50 @@ def sync_watching(conn):
         update_connection(conn["id"], {"last_error": "wetrakr_auth"})
 
 
+def sync_watching_stremio(conn):
+    label = conn_label(conn)
+    try:
+        items = stremio_recent(conn["stremio_auth_key"], limit=8)
+    except (PermissionError, requests.RequestException):
+        return
+
+    cur = None
+    for it in items:  # newest-modified first
+        st = it.get("state") or {}
+        off = st.get("timeOffset") or 0
+        dur = st.get("duration") or 0
+        if dur and 0.01 <= off / dur < 0.95:
+            cur = it
+            break
+    if not cur:
+        return
+
+    st = cur.get("state") or {}
+    off = int(st.get("timeOffset") or 0)
+    dur = int(st.get("duration") or 0)
+    vid = st.get("videoId") or (cur.get("_id") or cur.get("id"))
+
+    prev_vid, _, prev_off = (conn.get("watching_key") or "").partition("|")
+    try:
+        prev_off_i = int(prev_off)
+    except ValueError:
+        prev_off_i = -1
+    moved = (vid != prev_vid) or (off > prev_off_i)
+    if not moved:
+        return  # position frozen -> paused/stopped -> stop announcing
+
+    progress = round(off / dur * 100, 1) if dur else 0.0
+    payload = build_payload_stremio(cur, event="playing", progress=progress)
+    if not payload:
+        return
+    try:
+        if send_to_wetrakr(conn["wetrakr_token"], payload):
+            log.info("[%s] playing: %s (%d%%)", label, describe(payload), int(progress))
+            update_connection(conn["id"], {"watching_key": "%s|%s" % (vid, off)})
+    except PermissionError:
+        update_connection(conn["id"], {"last_error": "wetrakr_auth"})
+
+
 # ─── Main loop ───────────────────────────────────────────────────
 
 def run():
@@ -470,8 +655,11 @@ def run():
             log.info("history run: %d connections", len(conns))
             for c in conns:
                 try:
-                    if c.get("source") == "nuvio":
+                    src = c.get("source")
+                    if src == "nuvio":
                         sync_history_nuvio(c)
+                    elif src == "stremio":
+                        sync_history_stremio(c)
                     else:
                         sync_history(c)
                 except Exception:
@@ -479,11 +667,18 @@ def run():
             last_history = now
 
         for c in conns:
-            if c.get("live_enabled") and c.get("source") != "nuvio":
-                try:
+            if not c.get("live_enabled"):
+                continue
+            src = c.get("source")
+            try:
+                if src == "stremio":
+                    sync_watching_stremio(c)
+                elif src == "nuvio":
+                    pass  # nuvio is history-only
+                else:
                     sync_watching(c)
-                except Exception:
-                    log.exception("[%s] watching poll failed", conn_label(c))
+            except Exception:
+                log.exception("[%s] watching poll failed", conn_label(c))
 
         time.sleep(WATCH_INTERVAL)
 

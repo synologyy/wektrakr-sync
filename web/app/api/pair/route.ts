@@ -3,6 +3,7 @@ import {
   checkTraktProfile,
   insertPairing,
   nuvioSignIn,
+  stremioSignIn,
   wetrakrDeviceCode,
 } from "@/lib/server";
 
@@ -25,12 +26,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "invalid_json" }, { status: 400 });
   }
 
-  const source = body.source === "nuvio" ? "nuvio" : "trakt";
+  const source =
+    body.source === "nuvio"
+      ? "nuvio"
+      : body.source === "stremio"
+      ? "stremio"
+      : "trakt";
   const live = Boolean(body.live);
 
   let trakt_username: string | null = null;
   let nuvio_refresh_token: string | null = null;
   let nuvio_profile_id: number | null = null;
+  let stremio_auth_key: string | null = null;
 
   if (source === "trakt") {
     const username = (body.trakt_username ?? "").trim();
@@ -42,7 +49,7 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: profile }, { status: 422 });
     }
     trakt_username = username;
-  } else {
+  } else if (source === "nuvio") {
     const email = (body.email ?? "").trim();
     const password = body.password ?? "";
     const profileIndex = Number(body.profile_index);
@@ -56,6 +63,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "nuvio_login" }, { status: 422 });
     }
     nuvio_profile_id = profileIndex;
+  } else {
+    const email = (body.email ?? "").trim();
+    const password = body.password ?? "";
+    if (!email || !password) {
+      return NextResponse.json({ error: "invalid_login" }, { status: 400 });
+    }
+    try {
+      const t = await stremioSignIn(email, password);
+      stremio_auth_key = t.auth_key;
+    } catch {
+      return NextResponse.json({ error: "stremio_login" }, { status: 422 });
+    }
   }
 
   const code = await wetrakrDeviceCode();
@@ -64,6 +83,7 @@ export async function POST(req: Request) {
     trakt_username,
     nuvio_refresh_token,
     nuvio_profile_id,
+    stremio_auth_key,
     live_enabled: source === "nuvio" ? false : live,
     device_code: code.device_code,
     expires_at: new Date(Date.now() + code.expires_in * 1000).toISOString(),
